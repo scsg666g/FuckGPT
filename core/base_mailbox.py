@@ -176,6 +176,7 @@ def _create_api_mailbox(extra: dict, proxy: str | None) -> BaseMailbox:
 
     return ApiMailboxPool(
         pool_text=extra.get("api_mailbox_pool_text", ""),
+        pool_file=extra.get("api_mailbox_pool_file", ""),
         state_file=extra.get("api_mailbox_state_file", ""),
         allow_reuse=str(extra.get("api_mailbox_allow_reuse", "")).strip().lower()
         in {"1", "true", "yes", "on"},

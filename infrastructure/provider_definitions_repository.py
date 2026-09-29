@@ -96,6 +96,13 @@ _BUILTIN_DEFINITIONS: list[dict] = [
                 "hint": "每行一组。通用格式：邮箱----完整 API URL；flysms/icsms 格式：邮箱---token---取件 URL。其他商家的 token 三段格式不会自动套用这些接口。",
             },
             {
+                "key": "api_mailbox_pool_file",
+                "label": "邮箱池 JSON 文件路径",
+                "placeholder": "data/youxiang.json",
+                "category": "connection",
+                "hint": "可选；支持 JSON 字符串数组，或 {\"mailboxes\": [{\"email\": \"...\", \"api_url\": \"...\"}]}。也支持 email + token + pickup_url。与上方文本合并，同邮箱以上方文本为准。",
+            },
+            {
                 "key": "api_mailbox_poll_interval",
                 "label": "轮询间隔秒",
                 "placeholder": "3",

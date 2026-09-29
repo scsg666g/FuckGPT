@@ -1,8 +1,9 @@
 """Mailbox provider backed by per-address verification-code API URLs.
 
-Each configured row has the form ``email----api_url``.  The URL is treated as
-an opaque secret because it commonly contains the mailbox password or token in
-its query string.  FlySMS and ICSMS pickup links are also supported as
+Each configured row has the form ``email----api_url``.  Entries may be supplied
+as pasted text or loaded from a local JSON file.  The URL is treated as an
+opaque secret because it commonly contains the mailbox password or token in its
+query string.  FlySMS and ICSMS pickup links are also supported as
 ``email---token---pickup_url`` and are translated to their read-only latest
 message endpoint.
 """
@@ -24,6 +25,8 @@ from core.base_mailbox import BaseMailbox, MailboxAccount, _extract_verification
 
 
 DEFAULT_STATE_FILE = Path(__file__).resolve().parent.parent / "data" / ".api_mailbox_pool_state.json"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+MAX_POOL_FILE_SIZE = 5 * 1024 * 1024
 DEFAULT_CODE_PATTERN = r"(?<!#)(?<!\d)(\d{6})(?!\d)"
 
 
@@ -129,6 +132,75 @@ def parse_api_mailbox_rows(text: str) -> list[ApiMailboxEntry]:
     return entries
 
 
+def _required_json_text(item: dict, keys: tuple[str, ...]) -> str:
+    for key in keys:
+        value = item.get(key)
+        if value not in (None, ""):
+            return str(value).strip()
+    return ""
+
+
+def parse_api_mailbox_json(payload: object) -> list[ApiMailboxEntry]:
+    """Parse API mailbox entries from a JSON-compatible object."""
+
+    if isinstance(payload, dict) and "mailboxes" in payload:
+        items = payload.get("mailboxes")
+    elif isinstance(payload, list):
+        items = payload
+    elif isinstance(payload, dict) and "email" in payload:
+        items = [payload]
+    else:
+        raise ValueError('JSON 根节点应为数组或包含 "mailboxes" 数组的对象')
+
+    if not isinstance(items, list):
+        raise ValueError('JSON 字段 "mailboxes" 必须是数组')
+
+    entries: list[ApiMailboxEntry] = []
+    seen: set[str] = set()
+    for index, item in enumerate(items, start=1):
+        try:
+            if isinstance(item, str):
+                parsed = parse_api_mailbox_rows(item)
+                if len(parsed) != 1:
+                    raise ValueError("字符串条目必须包含一组邮箱配置")
+                entry = parsed[0]
+            elif isinstance(item, dict):
+                email = _required_json_text(item, ("email", "mailbox"))
+                token = _required_json_text(item, ("token", "access_token"))
+                pickup_url = _required_json_text(item, ("pickup_url", "pickupUrl"))
+                api_url = _required_json_text(item, ("api_url", "apiUrl"))
+                fallback_url = _required_json_text(item, ("url",))
+
+                if pickup_url or (token and fallback_url):
+                    pickup_url = pickup_url or fallback_url
+                    parsed = parse_api_mailbox_rows(f"{email}---{token}---{pickup_url}")
+                else:
+                    api_url = api_url or fallback_url
+                    parsed = parse_api_mailbox_rows(f"{email}----{api_url}")
+                entry = parsed[0]
+            else:
+                raise ValueError("条目必须是字符串或对象")
+        except (IndexError, ValueError) as exc:
+            raise ValueError(f"JSON 第 {index} 项格式错误：{exc}") from exc
+
+        if entry.key in seen:
+            continue
+        seen.add(entry.key)
+        entries.append(entry)
+    return entries
+
+
+def _deduplicate_entries(entries: list[ApiMailboxEntry]) -> list[ApiMailboxEntry]:
+    result: list[ApiMailboxEntry] = []
+    seen: set[str] = set()
+    for entry in entries:
+        if entry.key in seen:
+            continue
+        seen.add(entry.key)
+        result.append(entry)
+    return result
+
+
 class ApiMailboxPool(BaseMailbox):
     """Use fixed email addresses and poll their individual API URLs for OTPs."""
 
@@ -138,6 +210,7 @@ class ApiMailboxPool(BaseMailbox):
         self,
         *,
         pool_text: str = "",
+        pool_file: str = "",
         state_file: str = "",
         allow_reuse: bool = False,
         poll_interval: float | str = 3,
@@ -146,6 +219,7 @@ class ApiMailboxPool(BaseMailbox):
         session: requests.Session | None = None,
     ):
         self.pool_text = str(pool_text or "")
+        self.pool_file = str(pool_file or "").strip()
         self.state_file = Path(state_file or DEFAULT_STATE_FILE)
         self.allow_reuse = bool(allow_reuse)
         self.poll_interval = max(0.0, float(3 if poll_interval in (None, "") else poll_interval))
@@ -157,6 +231,7 @@ class ApiMailboxPool(BaseMailbox):
     def from_config(cls, config: dict) -> "ApiMailboxPool":
         return cls(
             pool_text=config.get("api_mailbox_pool_text", ""),
+            pool_file=config.get("api_mailbox_pool_file", ""),
             state_file=config.get("api_mailbox_state_file", ""),
             allow_reuse=_truthy(config.get("api_mailbox_allow_reuse")),
             poll_interval=config.get("api_mailbox_poll_interval", 3),
@@ -164,12 +239,51 @@ class ApiMailboxPool(BaseMailbox):
             proxy=config.get("proxy") or config.get("mailbox_proxy") or None,
         )
 
+    def _pool_file_path(self) -> Path:
+        path = Path(self.pool_file).expanduser()
+        if not path.is_absolute():
+            path = PROJECT_ROOT / path
+        return path.resolve()
+
+    def _load_pool_file_entries(self) -> list[ApiMailboxEntry]:
+        path = self._pool_file_path()
+        if path.suffix.lower() != ".json":
+            raise RuntimeError(f"API 邮箱池文件必须是 JSON 文件: {path}")
+        if not path.exists():
+            raise RuntimeError(f"API 邮箱池 JSON 文件不存在: {path}")
+        if not path.is_file():
+            raise RuntimeError(f"API 邮箱池 JSON 路径不是文件: {path}")
+        if path.stat().st_size > MAX_POOL_FILE_SIZE:
+            raise RuntimeError(f"API 邮箱池 JSON 文件超过 {MAX_POOL_FILE_SIZE // 1024 // 1024} MB 限制: {path}")
+
+        try:
+            text = path.read_text(encoding="utf-8-sig")
+        except OSError as exc:
+            raise RuntimeError(f"读取 API 邮箱池 JSON 文件失败: {path}: {exc}") from exc
+        if not text.strip():
+            raise RuntimeError(f"API 邮箱池 JSON 文件为空: {path}")
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"API 邮箱池 JSON 格式错误: {path}，第 {exc.lineno} 行第 {exc.colno} 列"
+            ) from exc
+        try:
+            return parse_api_mailbox_json(payload)
+        except ValueError as exc:
+            raise RuntimeError(f"API 邮箱池 JSON 内容无效: {path}: {exc}") from exc
+
     def _entries(self) -> list[ApiMailboxEntry]:
-        if not self.pool_text.strip():
-            raise RuntimeError("API 邮箱池为空，请按“邮箱----完整 API URL”或“邮箱---token---flysms/icsms取件URL”格式填写")
-        entries = parse_api_mailbox_rows(self.pool_text)
+        entries: list[ApiMailboxEntry] = []
+        if self.pool_text.strip():
+            entries.extend(parse_api_mailbox_rows(self.pool_text))
+        if self.pool_file:
+            entries.extend(self._load_pool_file_entries())
+        entries = _deduplicate_entries(entries)
         if not entries:
-            raise RuntimeError("API 邮箱池未解析到有效邮箱")
+            raise RuntimeError(
+                "API 邮箱池为空，请填写邮箱 API 池或配置邮箱池 JSON 文件路径"
+            )
         return entries
 
     def _available_entry(self) -> ApiMailboxEntry:

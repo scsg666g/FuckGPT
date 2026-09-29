@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from core.api_mailbox import ApiMailboxPool, parse_api_mailbox_rows
+from core.api_mailbox import ApiMailboxPool, parse_api_mailbox_json, parse_api_mailbox_rows
 
 
 class FakeResponse:
@@ -84,6 +84,84 @@ def test_api_mailbox_rejects_invalid_row_format():
         assert "邮箱----完整 API URL" in str(exc)
     else:
         raise AssertionError("invalid API mailbox row should fail")
+
+
+def test_parse_api_mailbox_json_accepts_string_array_and_object_entries():
+    rows = parse_api_mailbox_json(
+        {
+            "mailboxes": [
+                "first@example.com----https://mail.example/first",
+                {"email": "second@example.com", "api_url": "https://mail.example/second"},
+                {
+                    "email": "third@icloud.com",
+                    "token": "tok_secret",
+                    "pickup_url": "https://icsms.top/pickup#email=third%40icloud.com&key=tok_secret",
+                },
+            ]
+        }
+    )
+
+    assert [row.email for row in rows] == [
+        "first@example.com",
+        "second@example.com",
+        "third@icloud.com",
+    ]
+    assert rows[2].provider == "icsms"
+    assert rows[2].token == "tok_secret"
+
+
+def test_api_mailbox_loads_json_file_and_merges_with_text(tmp_path):
+    pool_file = tmp_path / "mailboxes.json"
+    pool_file.write_text(
+        json.dumps(
+            [
+                {"email": "duplicate@example.com", "api_url": "https://file.example/duplicate"},
+                {"email": "file@example.com", "api_url": "https://file.example/code"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    mailbox = ApiMailboxPool(
+        pool_text="duplicate@example.com----https://text.example/duplicate",
+        pool_file=str(pool_file),
+    )
+
+    rows = mailbox._entries()
+
+    assert [row.email for row in rows] == ["duplicate@example.com", "file@example.com"]
+    assert rows[0].api_url == "https://text.example/duplicate"
+
+
+def test_api_mailbox_rereads_json_file_without_recreating_pool(tmp_path):
+    pool_file = tmp_path / "mailboxes.json"
+    pool_file.write_text(
+        json.dumps([{"email": "first@example.com", "api_url": "https://mail.example/first"}]),
+        encoding="utf-8",
+    )
+    mailbox = ApiMailboxPool(pool_file=str(pool_file))
+    assert mailbox._entries()[0].email == "first@example.com"
+
+    pool_file.write_text(
+        json.dumps([{"email": "second@example.com", "api_url": "https://mail.example/second"}]),
+        encoding="utf-8",
+    )
+
+    assert mailbox._entries()[0].email == "second@example.com"
+
+
+def test_api_mailbox_reports_invalid_json_file_location(tmp_path):
+    pool_file = tmp_path / "mailboxes.json"
+    pool_file.write_text('{"mailboxes": [', encoding="utf-8")
+    mailbox = ApiMailboxPool(pool_file=str(pool_file))
+
+    try:
+        mailbox._entries()
+    except RuntimeError as exc:
+        message = str(exc)
+        assert "JSON 格式错误" in message
+        assert "第 1 行" in message
+    else:
+        raise AssertionError("invalid JSON should fail")
 
 
 def test_api_mailbox_ignores_baseline_code_and_returns_new_code(tmp_path):
