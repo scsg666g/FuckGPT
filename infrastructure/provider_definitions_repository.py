@@ -97,10 +97,10 @@ _BUILTIN_DEFINITIONS: list[dict] = [
             },
             {
                 "key": "api_mailbox_pool_file",
-                "label": "邮箱池 JSON 文件路径",
+                "label": "邮箱池文件路径",
                 "placeholder": "data/youxiang.json",
                 "category": "connection",
-                "hint": "可选；支持 JSON 字符串数组，或 {\"mailboxes\": [{\"email\": \"...\", \"api_url\": \"...\"}]}。也支持 email + token + pickup_url。与上方文本合并，同邮箱以上方文本为准。",
+                "hint": "可选；支持标准 JSON 数组、{\"mailboxes\": [...]}，也支持每行一组邮箱---token---取件 URL 的纯文本格式。与上方文本合并，同邮箱以上方文本为准。",
             },
             {
                 "key": "api_mailbox_poll_interval",

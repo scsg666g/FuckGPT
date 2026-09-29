@@ -132,6 +132,22 @@ def test_api_mailbox_loads_json_file_and_merges_with_text(tmp_path):
     assert rows[0].api_url == "https://text.example/duplicate"
 
 
+def test_api_mailbox_loads_line_based_pool_file(tmp_path):
+    pool_file = tmp_path / "email.json"
+    pool_file.write_text(
+        "# one mailbox per line\n"
+        "first@example.com---tok_first---https://icsms.top/pickup#email=first%40example.com&key=tok_first\n"
+        "second@example.com----https://mail.example/second\n",
+        encoding="utf-8",
+    )
+
+    rows = ApiMailboxPool(pool_file=str(pool_file))._entries()
+
+    assert [row.email for row in rows] == ["first@example.com", "second@example.com"]
+    assert rows[0].provider == "icsms"
+    assert rows[1].api_url == "https://mail.example/second"
+
+
 def test_api_mailbox_rereads_json_file_without_recreating_pool(tmp_path):
     pool_file = tmp_path / "mailboxes.json"
     pool_file.write_text(

@@ -264,10 +264,24 @@ class ApiMailboxPool(BaseMailbox):
             raise RuntimeError(f"API 邮箱池 JSON 文件为空: {path}")
         try:
             payload = json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(
-                f"API 邮箱池 JSON 格式错误: {path}，第 {exc.lineno} 行第 {exc.colno} 列"
-            ) from exc
+        except json.JSONDecodeError as json_exc:
+            if text.lstrip().startswith(("{", "[")):
+                raise RuntimeError(
+                    f"API 邮箱池 JSON 格式错误: {path}，第 {json_exc.lineno} 行第 {json_exc.colno} 列"
+                ) from json_exc
+            # 兼容把邮箱池文件当作纯文本维护的场景：每行一组
+            # “邮箱----API URL”或“邮箱---token---取件 URL”。文件名仍可
+            # 使用 .json，方便用户沿用现有配置路径。
+            try:
+                entries = parse_api_mailbox_rows(text)
+            except ValueError as text_exc:
+                raise RuntimeError(
+                    f"API 邮箱池文件既不是有效 JSON，也不是逐行邮箱配置: {path}；"
+                    f"JSON 第 {json_exc.lineno} 行第 {json_exc.colno} 列；文本格式错误: {text_exc}"
+                ) from text_exc
+            if not entries:
+                raise RuntimeError(f"API 邮箱池 JSON 文件为空: {path}")
+            return entries
         try:
             return parse_api_mailbox_json(payload)
         except ValueError as exc:
