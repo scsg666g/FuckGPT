@@ -55,11 +55,24 @@ def test_parse_api_mailbox_rows_accepts_flysms_pickup_url():
     assert rows[0].provider == "flysms"
 
 
+def test_parse_api_mailbox_rows_accepts_icsms_pickup_url():
+    rows = parse_api_mailbox_rows(
+        "user@icloud.com---tok_secret---"
+        "https://icsms.top/pickup#email=user%40icloud.com&key=tok_secret"
+    )
+
+    assert len(rows) == 1
+    assert rows[0].api_url == "https://icsms.top/api/pickup/messages/latest"
+    assert rows[0].token == "tok_secret"
+    assert rows[0].referer == "https://icsms.top/pickup"
+    assert rows[0].provider == "icsms"
+
+
 def test_api_mailbox_rejects_token_format_for_unknown_provider():
     try:
         parse_api_mailbox_rows("user@example.com---tok_secret---https://mail.example/pickup")
     except ValueError as exc:
-        assert "仅支持 flysms" in str(exc)
+        assert "仅支持 flysms.xyz/flysms.top/icsms.top" in str(exc)
     else:
         raise AssertionError("unknown token mailbox row should fail")
 
@@ -144,6 +157,28 @@ def test_api_mailbox_reads_flysms_latest_message_with_auth_headers(tmp_path):
     assert headers["Authorization"] == "Bearer tok_secret"
     assert headers["X-Mailbox-Email"] == "lyses-danish-7c@icloud.com"
     assert headers["Referer"] == "https://flysms.top/icloud/pickup"
+
+
+def test_api_mailbox_reads_icsms_latest_message_with_auth_headers(tmp_path):
+    session = FakeSession([{"message": {"text": "verification code: 384921"}}])
+    mailbox = ApiMailboxPool(
+        pool_text=(
+            "user@icloud.com---tok_secret---"
+            "https://icsms.top/pickup#email=user%40icloud.com&key=tok_secret"
+        ),
+        state_file=str(tmp_path / "state.json"),
+        poll_interval=0,
+        session=session,
+    )
+    account = mailbox.get_email()
+
+    assert mailbox.wait_for_code(account, timeout=1) == "384921"
+    url, kwargs = session.calls[0]
+    headers = kwargs["headers"]
+    assert url == "https://icsms.top/api/pickup/messages/latest"
+    assert headers["Authorization"] == "Bearer tok_secret"
+    assert headers["X-Mailbox-Email"] == "user@icloud.com"
+    assert headers["Referer"] == "https://icsms.top/pickup"
 
 
 def test_api_mailbox_account_metadata_keeps_runtime_api_url(tmp_path):

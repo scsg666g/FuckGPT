@@ -2,7 +2,7 @@
 
 Each configured row has the form ``email----api_url``.  The URL is treated as
 an opaque secret because it commonly contains the mailbox password or token in
-its query string.  flysms pickup links are also supported as
+its query string.  FlySMS and ICSMS pickup links are also supported as
 ``email---token---pickup_url`` and are translated to their read-only latest
 message endpoint.
 """
@@ -44,7 +44,14 @@ def _truthy(value: object) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on", "y"}
 
 
-_FLYSMS_HOSTS = {"flysms.xyz", "www.flysms.xyz", "flysms.top", "www.flysms.top"}
+_PICKUP_HOST_PROVIDERS = {
+    "flysms.xyz": "flysms",
+    "www.flysms.xyz": "flysms",
+    "flysms.top": "flysms",
+    "www.flysms.top": "flysms",
+    "icsms.top": "icsms",
+    "www.icsms.top": "icsms",
+}
 
 
 def _strip_fragment(url: str) -> str:
@@ -52,14 +59,21 @@ def _strip_fragment(url: str) -> str:
     return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, parsed.query, ""))
 
 
-def _flysms_api_url(pickup_url: str) -> str:
+def _pickup_provider(pickup_url: str) -> str:
     parsed = urlparse(pickup_url)
-    host = parsed.netloc.lower()
-    if host not in _FLYSMS_HOSTS:
-        raise ValueError("token 取件格式目前仅支持 flysms.xyz/flysms.top")
+    host = (parsed.hostname or "").lower()
+    provider = _PICKUP_HOST_PROVIDERS.get(host)
+    if not provider:
+        raise ValueError("token 取件格式目前仅支持 flysms.xyz/flysms.top/icsms.top")
+    return provider
+
+
+def _pickup_api_url(pickup_url: str) -> str:
+    parsed = urlparse(pickup_url)
+    _pickup_provider(pickup_url)
     path = parsed.path.rstrip("/")
     if not path.endswith("/pickup"):
-        raise ValueError("flysms 取件 URL 应为 .../pickup 页面地址")
+        raise ValueError("取件 URL 应为 .../pickup 页面地址")
     base_path = path[: -len("/pickup")]
     api_path = f"{base_path}/api/pickup/messages/latest" if base_path else "/api/pickup/messages/latest"
     return urlunparse((parsed.scheme, parsed.netloc, api_path, "", "", ""))
@@ -79,7 +93,7 @@ def parse_api_mailbox_rows(text: str) -> list[ApiMailboxEntry]:
             email = email.strip()
             api_url = api_url.strip()
             if "@" not in email or not api_url:
-                raise ValueError(f"API 邮箱第 {line_number} 行格式错误，应为：邮箱----完整 API URL 或 邮箱---token---flysms取件URL")
+                raise ValueError(f"API 邮箱第 {line_number} 行格式错误，应为：邮箱----完整 API URL 或 邮箱---token---flysms/icsms取件URL")
             parsed = urlparse(api_url)
             if parsed.scheme not in {"http", "https"} or not parsed.netloc:
                 raise ValueError(f"API 邮箱第 {line_number} 行 URL 无效，仅支持 http/https")
@@ -87,15 +101,16 @@ def parse_api_mailbox_rows(text: str) -> list[ApiMailboxEntry]:
         elif "---" in line:
             parts = [part.strip() for part in line.split("---", 2)]
             if len(parts) != 3:
-                raise ValueError(f"API 邮箱第 {line_number} 行格式错误，应为：邮箱---token---flysms取件URL")
+                raise ValueError(f"API 邮箱第 {line_number} 行格式错误，应为：邮箱---token---flysms/icsms取件URL")
             email, token, pickup_url = parts
             if "@" not in email or not token or not pickup_url:
-                raise ValueError(f"API 邮箱第 {line_number} 行格式错误，应为：邮箱---token---flysms取件URL")
+                raise ValueError(f"API 邮箱第 {line_number} 行格式错误，应为：邮箱---token---flysms/icsms取件URL")
             parsed = urlparse(pickup_url)
             if parsed.scheme not in {"http", "https"} or not parsed.netloc:
                 raise ValueError(f"API 邮箱第 {line_number} 行 URL 无效，仅支持 http/https")
             try:
-                api_url = _flysms_api_url(pickup_url)
+                api_url = _pickup_api_url(pickup_url)
+                provider = _pickup_provider(pickup_url)
             except ValueError as exc:
                 raise ValueError(f"API 邮箱第 {line_number} 行格式错误：{exc}") from exc
             entry = ApiMailboxEntry(
@@ -103,10 +118,10 @@ def parse_api_mailbox_rows(text: str) -> list[ApiMailboxEntry]:
                 api_url=api_url,
                 token=token,
                 referer=_strip_fragment(pickup_url),
-                provider="flysms",
+                provider=provider,
             )
         else:
-            raise ValueError(f"API 邮箱第 {line_number} 行格式错误，应为：邮箱----完整 API URL 或 邮箱---token---flysms取件URL")
+            raise ValueError(f"API 邮箱第 {line_number} 行格式错误，应为：邮箱----完整 API URL 或 邮箱---token---flysms/icsms取件URL")
         if entry.key in seen:
             continue
         seen.add(entry.key)
@@ -151,7 +166,7 @@ class ApiMailboxPool(BaseMailbox):
 
     def _entries(self) -> list[ApiMailboxEntry]:
         if not self.pool_text.strip():
-            raise RuntimeError("API 邮箱池为空，请按“邮箱----完整 API URL”或“邮箱---token---flysms取件URL”格式填写")
+            raise RuntimeError("API 邮箱池为空，请按“邮箱----完整 API URL”或“邮箱---token---flysms/icsms取件URL”格式填写")
         entries = parse_api_mailbox_rows(self.pool_text)
         if not entries:
             raise RuntimeError("API 邮箱池未解析到有效邮箱")
@@ -241,7 +256,7 @@ class ApiMailboxPool(BaseMailbox):
 
     def _request(self, entry: ApiMailboxEntry) -> tuple[object | None, str]:
         headers = {"Accept": "application/json, text/plain, */*", "User-Agent": "FuckGPT/api-mailbox"}
-        if entry.provider == "flysms" and entry.token:
+        if entry.provider in {"flysms", "icsms"} and entry.token:
             headers["Authorization"] = f"Bearer {entry.token}"
             headers["X-Mailbox-Email"] = entry.email
             if entry.referer:
