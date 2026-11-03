@@ -2165,6 +2165,80 @@ function ImportModal({ onClose, onDone }: { onClose: () => void; onDone: () => v
   )
 }
 
+function BatchCopyTokenButton({ selectedIds, disabled }: { selectedIds: number[]; disabled: boolean }) {
+  const [copying, setCopying] = useState(false)
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
+
+  useEffect(() => {
+    if (!feedback) return
+    const timer = setTimeout(() => setFeedback(null), 5000)
+    return () => clearTimeout(timer)
+  }, [feedback])
+
+  const copySelectedTokens = async () => {
+    if (copying || selectedIds.length === 0) return
+    const ids = [...selectedIds]
+    setCopying(true)
+    setFeedback(null)
+    try {
+      const tokens: string[] = []
+      let missing = 0
+      let failed = 0
+      // 分批读取，避免大量勾选时同时发起过多请求；结果保持勾选顺序。
+      for (let offset = 0; offset < ids.length; offset += 10) {
+        const results = await Promise.allSettled(ids.slice(offset, offset + 10).map(async id => {
+          const response = await apiFetch(`/accounts/${id}/credentials?scope=platform`)
+          const credentials = Array.isArray(response?.items) ? response.items as AccountCredential[] : []
+          return selectCommonToken(credentials)?.value.trim() || ''
+        }))
+        for (const result of results) {
+          if (result.status === 'rejected') failed += 1
+          else if (!result.value) missing += 1
+          else tokens.push(result.value)
+        }
+      }
+      const skipped = [
+        missing > 0 ? `${missing} 个账号无 Token` : '',
+        failed > 0 ? `${failed} 个账号读取失败` : '',
+      ].filter(Boolean).join('，')
+      if (tokens.length === 0) throw new Error(`未复制：${skipped}`)
+      await copyToClipboard(tokens.join('\n'))
+      setFeedback({
+        type: 'success',
+        text: `已复制 ${tokens.length} 个 Token，一行一个${skipped ? `（已跳过：${skipped}）` : ''}`,
+      })
+    } catch (error) {
+      setFeedback({ type: 'error', text: error instanceof Error ? error.message : '复制 Token 失败' })
+    } finally {
+      setCopying(false)
+    }
+  }
+
+  return (
+    <>
+      <Button
+        variant="ghost"
+        size="sm"
+        disabled={disabled || copying || selectedIds.length === 0}
+        className="h-7 whitespace-nowrap px-2.5 text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]"
+        title="复制勾选账号的平台常用 Token，一行一个"
+        onClick={copySelectedTokens}
+      >
+        {copying ? <RefreshCw className="mr-1 h-3.5 w-3.5 animate-spin" /> : <KeyRound className="mr-1 h-3.5 w-3.5" />}
+        {copying ? '复制中…' : `复制 Token(${selectedIds.length})`}
+      </Button>
+      {feedback && (
+        <div
+          role="status"
+          className={`fixed right-5 top-5 z-[9999] max-w-md rounded-xl border border-[var(--border)] bg-[var(--bg-card)] px-4 py-3 text-xs shadow-lg ${feedback.type === 'success' ? 'text-emerald-500' : 'text-red-500'}`}
+        >
+          {feedback.text}
+        </div>
+      )}
+    </>
+  )
+}
+
 function ExportMenu({
   total,
   filters,
@@ -2767,57 +2841,60 @@ export default function Accounts() {
                     <option key={value} value={value}>并发 {value}</option>
                   ))}
                 </select>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  disabled={batchCodexAuthorizing || batchRefreshing || loading}
-                  className="h-7 px-2.5 text-[var(--text-muted)] hover:text-violet-500 hover:bg-violet-500/10"
-                  title="为勾选账号批量执行 Codex OAuth 授权"
-                  onClick={async () => {
-                    setBatchCodexAuthorizing(true)
-                    try {
-                      const ids = [...selectedIds]
-                      const selectAll = ids.length === 0
-                      const targetCount = selectAll ? total : ids.length
-                      if (!window.confirm(`为当前${selectAll ? '完整筛选结果' : '已选账号'}（${targetCount} 个）执行 Codex OAuth 授权？`)) {
-                        setBatchCodexAuthorizing(false)
-                        return
-                      }
-                      const res = await apiFetch('/accounts/codex-oauth/authorize', {
-                        method: 'POST',
-                        body: JSON.stringify({
-                          platform: tab,
-                          ids,
-                          select_all: selectAll,
-                          filters: selectAll ? toApiFilters(filters) : {},
-                          platform_proxy_mode: batchProxyMode,
-                          platform_proxy_value: batchProxyValue.trim(),
-                          concurrency: batchCodexConcurrency,
-                          params: {
-                            oauth_mode: batchCodexOAuthMode,
-                            browser_mode: 'headless',
-                            keep_browser_open: 'false',
+                <div className="flex shrink-0 flex-col items-start gap-1">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={batchCodexAuthorizing || batchRefreshing || loading}
+                    className="h-7 px-2.5 text-[var(--text-muted)] hover:text-violet-500 hover:bg-violet-500/10"
+                    title="为勾选账号批量执行 Codex OAuth 授权"
+                    onClick={async () => {
+                      setBatchCodexAuthorizing(true)
+                      try {
+                        const ids = [...selectedIds]
+                        const selectAll = ids.length === 0
+                        const targetCount = selectAll ? total : ids.length
+                        if (!window.confirm(`为当前${selectAll ? '完整筛选结果' : '已选账号'}（${targetCount} 个）执行 Codex OAuth 授权？`)) {
+                          setBatchCodexAuthorizing(false)
+                          return
+                        }
+                        const res = await apiFetch('/accounts/codex-oauth/authorize', {
+                          method: 'POST',
+                          body: JSON.stringify({
+                            platform: tab,
+                            ids,
+                            select_all: selectAll,
+                            filters: selectAll ? toApiFilters(filters) : {},
                             platform_proxy_mode: batchProxyMode,
                             platform_proxy_value: batchProxyValue.trim(),
-                          },
-                        }),
-                      })
-                      if (res?.task_id) {
-                        setBatchTask({
-                          taskId: res.task_id,
-                          title: `Codex OAuth 批量授权 (${targetCount})`,
+                            concurrency: batchCodexConcurrency,
+                            params: {
+                              oauth_mode: batchCodexOAuthMode,
+                              browser_mode: 'headless',
+                              keep_browser_open: 'false',
+                              platform_proxy_mode: batchProxyMode,
+                              platform_proxy_value: batchProxyValue.trim(),
+                            },
+                          }),
                         })
-                        setBatchTaskStatus(null)
+                        if (res?.task_id) {
+                          setBatchTask({
+                            taskId: res.task_id,
+                            title: `Codex OAuth 批量授权 (${targetCount})`,
+                          })
+                          setBatchTaskStatus(null)
+                        }
+                      } catch (e) {
+                        console.error(e)
+                        setBatchCodexAuthorizing(false)
                       }
-                    } catch (e) {
-                      console.error(e)
-                      setBatchCodexAuthorizing(false)
-                    }
-                  }}
-                >
-                  <ShieldCheck className={`mr-1 h-3.5 w-3.5 ${batchCodexAuthorizing ? 'animate-pulse' : ''}`} />
-                  {batchCodexAuthorizing ? '授权中...' : `Codex授权(${selectedCount || total})`}
-                </Button>
+                    }}
+                  >
+                    <ShieldCheck className={`mr-1 h-3.5 w-3.5 ${batchCodexAuthorizing ? 'animate-pulse' : ''}`} />
+                    {batchCodexAuthorizing ? '授权中...' : `Codex授权(${selectedCount || total})`}
+                  </Button>
+                  <BatchCopyTokenButton selectedIds={[...selectedIds]} disabled={loading || bulkDeleting} />
+                </div>
               </>
             ) : null}
             <Button
